@@ -1,10 +1,14 @@
 #!/bin/sh
 "exec" "`dirname $0`/.venv/bin/python" "-u" "$0" "$@"
 
+import os
+import sys
 import argparse
 import asyncio
 import datetime
 import json
+import tempfile
+
 from dataclasses import dataclass
 from collections import defaultdict
 from typing import List, Tuple, Optional
@@ -42,14 +46,10 @@ class Moex:
         return resp
 
 class Binance:
-    async def fetch(self, tickers: List[str]) -> List[Tuple[str, Optional[Info]]]:
-        resp = []
-        for ticker, r in zip(tickers, await asyncio.gather(*[fetch_json(f'https://api.binance.com/api/v3/ticker/24hr?symbol={ticker}') for ticker in tickers], return_exceptions=True)):
-            if isinstance(r, Exception):
-                # print(f'exception: {el}')
-                resp.append((ticker, None))
-                continue
-            resp.append((ticker, Info(*[float(r[x]) for x in ('openPrice', 'lowPrice', 'highPrice', 'lastPrice', 'priceChangePercent')])))
+    async def fetch(self, tickers: List[str]):
+        raw = await fetch_json(f'https://api.binance.com/api/v3/ticker/tradingDay?timeZone=3&symbols={json.dumps(tickers).replace(" ", "")}')
+        fields = ('openPrice', 'lowPrice', 'highPrice', 'lastPrice', 'priceChangePercent')
+        resp = [(r['symbol'], Info(*[float(r[x]) for x in fields])) for r in raw]
         return resp
 
 
@@ -89,9 +89,11 @@ async def process(tickers):
             for ticker, data in el:
                 sorted_results[ticker2pos[ticker]][-1] = data
 
-        line = '<span color="#888888"> | </span>'.join(format_line(symbol, res) for _, symbol, res in sorted_results)
+        line = '<span color="#666666"> | </span>'.join(format_line(symbol, res) for _, symbol, res in sorted_results)
+        short_line = '<span color="#666666">|</span>'.join(f'{symbol}{res.last_price:.1f}'for _, symbol, res in sorted_results)
 
-        tooltip = f'{".":<10s}' + ''.join(f'{symbol:<10s}' for _, symbol, _ in sorted_results)
+        tooltip = f'<span color="#555555">update {datetime.datetime.now()}</span>\n'
+        tooltip += f'{".":<10s}' + ''.join(f'{symbol:<10s}' for _, symbol, _ in sorted_results)
         for title, field in (('open', 'open_price'), ('low', 'low_price'), ('high', 'high_price'), ('last', 'last_price'), ('change%', 'change_percent')):
             tooltip += f'\n{title:<10s}'
             for _, _, res in sorted_results:
@@ -100,13 +102,61 @@ async def process(tickers):
                 else:
                     tooltip += f'{"?":<10s}'
 
-        yield line, tooltip
+        yield line, short_line, tooltip
 
 
-async def main(tickers, out_format, update_timeout):
-    async for line, tooltip in process(tickers):
+class ControlServer:
+    def __init__(self):
+        self.socket_file = f'{tempfile.gettempdir()}/stonks_{os.geteuid()}.sock'
+        self._msg = []
+        self._event = asyncio.Event()
+
+    async def socket_cb(self, reader, _):
+        msg = await reader.read(1)
+        self._msg.append(msg)
+        self._event.set()
+
+    async def _get_event(self):
+        await self._event.wait()
+        msg = self._msg.pop()
+        if msg == b'\x00':
+            sys.exit(0)
+
+        if len(self._msg) == 0:
+            self._event.clear()
+        return msg
+
+    async def exec(self, cmd: bytes):
+        _, writer = await asyncio.open_unix_connection(path=self.socket_file)
+        writer.write(cmd)
+        await writer.drain()
+
+    async def get_event(self, timeout):
+        try:
+            return await asyncio.wait_for(self._get_event(), timeout)
+        except asyncio.TimeoutError:
+            return None
+
+    async def start(self):
+        if os.path.exists(self.socket_file):
+            try:
+                await self.exec(b'\x00')
+            except:
+                pass
+            os.remove(self.socket_file)
+        await asyncio.start_unix_server(self.socket_cb, path=self.socket_file)
+
+
+async def main(cmd, tickers, out_format, update_timeout):
+    csrv = ControlServer()
+    if cmd != None:
+        return await csrv.exec(cmd)
+    await csrv.start()
+
+    short_mode = False
+    async for line, short_line, tooltip in process(tickers):
         if out_format == 'waybar':
-            print(json.dumps({'text': line, 'tooltip': tooltip, 'alt': 'shiftdel'}))
+            print(json.dumps({'text': short_line if short_mode else line, 'tooltip': tooltip, 'alt': 'shiftdel'}))
 
         elif out_format == 'awesome':
             print(f'text\t{line}')
@@ -115,7 +165,12 @@ async def main(tickers, out_format, update_timeout):
             for t in tooltip.split('\n'):
                 print(f'tooltip\t{t}')
 
-        await asyncio.sleep(update_timeout)
+        ev = await csrv.get_event(update_timeout)
+        if ev is not None:
+            if ev == b't':
+                short_mode = not short_mode
+            # print('event', ev)
+        # await asyncio.sleep(update_timeout)
 
 
 def parse_arg_ticker(s: str):
@@ -124,11 +179,17 @@ def parse_arg_ticker(s: str):
     assert x[0] in PROVIDERS
     return x
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ticker', type=parse_arg_ticker, action='append', help='tickers, format: {provider}:{ticker}:{symbol}', required=True)
-    parser.add_argument('--format', choices=['awesome', 'waybar'], required=True, help='output format')
-    parser.add_argument('--update-interval', type=int, required=False, default=60, help='update interval, seconds')
+    parser.add_argument('--cmd', choices=['update-now', 'toggle-mode'],  help='send command to running app')
+    args, _ = parser.parse_known_args()
+
+    req = args.cmd is None
+    parser.add_argument('--ticker', type=parse_arg_ticker, action='append', help='tickers, format: {provider}:{ticker}:{symbol}', required=req)
+    parser.add_argument('--format', choices=['awesome', 'waybar'], help='output format', required=req)
+    parser.add_argument('--update-interval', type=int, default=60, help='update interval, seconds', required=False)
     args = parser.parse_args()
 
-    asyncio.run(main(args.ticker, args.format, args.update_interval))
+    cmd = args.cmd[0].encode('ascii') if args.cmd is not None else None
+    asyncio.run(main(cmd, args.ticker, args.format, args.update_interval))
