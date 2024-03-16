@@ -24,7 +24,7 @@ class Info:
     change_percent: float
 
 async def fetch_json(url):
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1)) as session:
         async with session.get(url) as response:
             return await response.json()
 
@@ -90,7 +90,7 @@ async def process(tickers):
                 sorted_results[ticker2pos[ticker]][-1] = data
 
         line = '<span color="#666666"> | </span>'.join(format_line(symbol, res) for _, symbol, res in sorted_results)
-        short_line = '<span color="#666666">|</span>'.join(f'{symbol}{res.last_price:.1f}'for _, symbol, res in sorted_results)
+        short_line = '<span color="#666666">|</span>'.join(f'{symbol}{(res.last_price if res is not None else 0):.1f}'for _, symbol, res in sorted_results)
 
         tooltip = f'<span color="#555555">update {datetime.datetime.now()}</span>\n'
         tooltip += f'{".":<10s}' + ''.join(f'{symbol:<10s}' for _, symbol, _ in sorted_results)
