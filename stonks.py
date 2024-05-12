@@ -60,7 +60,7 @@ PROVIDERS = {
 }
 
 
-def format_line(symbol: str, res: Optional[Info]):
+def format_line(symbol: str, res: Optional[Info], short: bool):
     if res is None:
         return f'{symbol} ?'
     if res.change_percent > 0:
@@ -69,7 +69,10 @@ def format_line(symbol: str, res: Optional[Info]):
     else:
         color = 'ee4444'
         prefix = ''
-    return f'{symbol} {res.last_price:.2f} <span font="sans 6" color="#{color}">{prefix}{res.change_percent:.1f}%</span>'
+    if short:
+        return f'{symbol}<span color="#{color}">{res.last_price:.1f}</span>'
+    else:
+        return f'{symbol} {res.last_price:.2f} <span font="sans 6" color="#{color}">{prefix}{res.change_percent:.1f}%</span>'
 
 
 async def process(tickers):
@@ -89,8 +92,8 @@ async def process(tickers):
             for ticker, data in el:
                 sorted_results[ticker2pos[ticker]][-1] = data
 
-        line = '<span color="#666666"> | </span>'.join(format_line(symbol, res) for _, symbol, res in sorted_results)
-        short_line = '<span color="#666666">|</span>'.join(f'{symbol}{(res.last_price if res is not None else 0):.1f}'for _, symbol, res in sorted_results)
+        line = '<span color="#666666"> | </span>'.join(format_line(symbol, res, False) for _, symbol, res in sorted_results)
+        short_line = '<span color="#666666">|</span>'.join(format_line(symbol, res, True) for _, symbol, res in sorted_results)
 
         tooltip = f'<span color="#555555">update {datetime.datetime.now()}</span>\n'
         tooltip += f'{".":<10s}' + ''.join(f'{symbol:<10s}' for _, symbol, _ in sorted_results)
@@ -154,6 +157,7 @@ async def main(cmd, tickers, out_format, update_timeout):
     await csrv.start()
 
     short_mode = False
+    short_mode = True
     async for line, short_line, tooltip in process(tickers):
         if out_format == 'waybar':
             print(json.dumps({'text': short_line if short_mode else line, 'tooltip': tooltip, 'alt': 'shiftdel'}))
