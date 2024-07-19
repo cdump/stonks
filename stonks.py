@@ -8,6 +8,7 @@ import asyncio
 import datetime
 import json
 import tempfile
+import xml.etree.ElementTree as ET
 
 from dataclasses import dataclass
 from collections import defaultdict
@@ -22,6 +23,12 @@ class Info:
     high_price: float
     last_price: float
     change_percent: float
+
+async def fetch_xml(url):
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1)) as session:
+        async with session.get(url) as response:
+            raw = await response.text()
+            return ET.fromstring(raw)
 
 async def fetch_json(url):
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1)) as session:
@@ -45,6 +52,14 @@ class Moex:
                 resp.append((ticker, None))
         return resp
 
+
+class Cbr:
+    async def fetch(self, tickers: List[str]):
+        tree = await fetch_xml('https://cbr.ru/scripts/XML_daily.asp')
+        values = {rec.findtext('CharCode'): float(rec.findtext('Value').replace(',', '.')) for rec in tree.findall('Valute')}
+        return [(ticker, Info(*[values[ticker]] * 4, 0)) for ticker in tickers]
+
+
 class Binance:
     async def fetch(self, tickers: List[str]):
         raw = await fetch_json(f'https://api.binance.com/api/v3/ticker/tradingDay?timeZone=3&symbols={json.dumps(tickers).replace(" ", "")}')
@@ -57,13 +72,14 @@ PROVIDERS = {
     'moex_currency': Moex('currency', 'selt', 'CETS'),
     'moex_futures': Moex('futures', 'forts', 'RFUD'),
     'binance': Binance(),
+    'cbr': Cbr(),
 }
 
 
 def format_line(symbol: str, res: Optional[Info], short: bool):
     if res is None:
         return f'{symbol} ?'
-    if res.change_percent > 0:
+    if res.change_percent >= 0:
         color = '33aa33'
         prefix = '+'
     else:
@@ -152,7 +168,7 @@ class ControlServer:
 
 async def main(cmd, tickers, out_format, update_timeout):
     csrv = ControlServer()
-    if cmd != None:
+    if cmd is not None:
         return await csrv.exec(cmd)
     await csrv.start()
 
@@ -164,7 +180,7 @@ async def main(cmd, tickers, out_format, update_timeout):
 
         elif out_format == 'awesome':
             print(f'text\t{line}')
-            print(f'tooltipstart')
+            print('tooltipstart')
             print(f'tooltip\t<span color="#555555">{datetime.datetime.now()}</span>')
             for t in tooltip.split('\n'):
                 print(f'tooltip\t{t}')
